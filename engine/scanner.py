@@ -17,9 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+try:
+    import psutil as _psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    _PSUTIL_AVAILABLE = False
 
 import config
 from database.db import DatabaseManager
@@ -275,8 +282,9 @@ class Scanner:
         # Update live opportunities list
         self._live_opportunities = safe_opps
 
-        # Step 8: Expire stale opportunities
+        # Step 8: Expire stale opportunities and prune old markets
         await self.db.expire_old_opportunities()
+        await self.db.prune_old_markets(days=7)
 
         # Step 9: Fire alerts
         self.notifier.notify_all(safe_opps)
@@ -306,6 +314,18 @@ class Scanner:
         )
 
         await self.db.complete_scan(result)
+
+        # Resource monitor
+        if _PSUTIL_AVAILABLE:
+            try:
+                proc = _psutil.Process(os.getpid())
+                cpu_pct = proc.cpu_percent(interval=0.1)
+                rss_mb = proc.memory_info().rss / 1_048_576
+                logger.info(
+                    f"[scanner] Resources — CPU: {cpu_pct:.1f}% | RAM: {rss_mb:.0f} MB"
+                )
+            except Exception:
+                pass
 
         logger.info(
             f"[scanner] Scan done in {duration_ms}ms | "

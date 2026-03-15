@@ -25,3 +25,4 @@ cryptography>=42.0.0
 
 # Utilities
 orjson==3.10.3
+psutil>=5.9.0

@@ -24,6 +24,12 @@ from database.models import NormalisedMarket, MarketMatch
 
 logger = logging.getLogger(__name__)
 
+# ─── Fuzzy score cache ────────────────────────────────────────────────────────
+# Fuzzy scores are deterministic given the title pair, so we cache them for the
+# lifetime of the process. On the second scan, 900k+ fuzzy calls are skipped.
+# Keys are (title_a, title_b) tuples; values are (token_sort, token_set).
+_fuzzy_cache: dict[tuple[str, str], tuple[float, float]] = {}
+
 # ─── US State lookup ──────────────────────────────────────────────────────────
 # Full state names only — abbreviations are too ambiguous in natural language
 # (e.g. " in " matches Indiana but also "race in Arizona")
@@ -392,19 +398,23 @@ class MatchingEngine:
         title_a = pm.title
         title_b = km.title
 
-        # Compare both raw titles AND synonym-normalized forms; use best score.
-        # This lets "BTC above $90k" match "Bitcoin above 90000", etc.
-        norm_a = _normalise_for_matching(title_a)
-        norm_b = _normalise_for_matching(title_b)
-
-        token_sort = max(
-            fuzz.token_sort_ratio(title_a, title_b),
-            fuzz.token_sort_ratio(norm_a, norm_b),
-        )
-        token_set = max(
-            fuzz.token_set_ratio(title_a, title_b),
-            fuzz.token_set_ratio(norm_a, norm_b),
-        )
+        # Cache fuzzy scores by title pair — titles never change, so the result
+        # is deterministic. Eliminates 900k+ redundant fuzzy calls on scan 2+.
+        _fuzzy_key = (title_a, title_b)
+        if _fuzzy_key in _fuzzy_cache:
+            token_sort, token_set = _fuzzy_cache[_fuzzy_key]
+        else:
+            norm_a = _normalise_for_matching(title_a)
+            norm_b = _normalise_for_matching(title_b)
+            token_sort = max(
+                fuzz.token_sort_ratio(title_a, title_b),
+                fuzz.token_sort_ratio(norm_a, norm_b),
+            )
+            token_set = max(
+                fuzz.token_set_ratio(title_a, title_b),
+                fuzz.token_set_ratio(norm_a, norm_b),
+            )
+            _fuzzy_cache[_fuzzy_key] = (token_sort, token_set)
 
         if token_sort < config.FUZZY_MIN_TOKEN_SORT or token_set < config.FUZZY_MIN_TOKEN_SET:
             self.stats["layer3_eliminated"] += 1

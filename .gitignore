@@ -1,6 +1,9 @@
 # Environment / secrets
 .env
 
+# Machine-specific launchd plist (copy to ~/Library/LaunchAgents manually)
+com.polymarket.arb.plist
+
 # Database
 database/*.db
 database/*.db-shm

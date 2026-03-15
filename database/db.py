@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import config
@@ -375,6 +375,31 @@ class DatabaseManager:
             (now,),
         )
         await self._db.commit()
+
+    async def prune_old_markets(self, days: int = 7) -> int:
+        """
+        Delete market rows last updated more than `days` ago that are not
+        referenced by any live opportunity. Returns the count deleted.
+        Keeps the DB small so repeated scans don't accumulate stale data.
+        """
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        async with self._db.execute(
+            """
+            DELETE FROM markets
+            WHERE updated_at < ?
+              AND id NOT IN (
+                SELECT market_a_id FROM opportunities WHERE status = 'live'
+                UNION
+                SELECT market_b_id FROM opportunities WHERE status = 'live'
+              )
+            """,
+            (cutoff,),
+        ) as cur:
+            deleted = cur.rowcount
+        await self._db.commit()
+        if deleted:
+            logger.info(f"[db] Pruned {deleted} stale markets (> {days} days old)")
+        return deleted
 
     # ─── Opportunity tracking ─────────────────────────────────────────────────
 

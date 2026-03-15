@@ -41,6 +41,8 @@ class BaseExchange(ABC):
     def __init__(self) -> None:
         self._session: Optional[aiohttp.ClientSession] = None
         self._cache: dict[str, tuple[float, any]] = {}   # key -> (timestamp, data)
+        self._etags: dict[str, str] = {}                 # cache_key -> ETag value
+        self._etag_responses: dict[str, any] = {}        # cache_key -> last 200 response
         self._last_fetch_time: Optional[float] = None
         self._markets_count: int = 0
         self._error_count: int = 0
@@ -117,13 +119,23 @@ class BaseExchange(ABC):
         if self._session is None:
             await self.open()
 
+        # Build request headers, injecting ETag for conditional GET
+        req_headers = dict(headers or {})
+        if cache_key and cache_key in self._etags:
+            req_headers["If-None-Match"] = self._etags[cache_key]
+
         last_exc: Optional[Exception] = None
         for attempt in range(config.MAX_RETRIES):
             try:
                 self._api_call_count += 1
                 async with self._session.get(
-                    url, params=params, headers=headers
+                    url, params=params, headers=req_headers or headers
                 ) as resp:
+                    # 304 Not Modified — server confirms our cached copy is current
+                    if resp.status == 304 and cache_key in self._etag_responses:
+                        self._cache_hit_count += 1
+                        logger.debug(f"[{self._platform_name}] ETag hit (304): {cache_key}")
+                        return self._etag_responses[cache_key]
                     if resp.status == 401:
                         # Auth failure — don't retry, fail fast with clear message
                         raise ExchangeError(
@@ -146,6 +158,11 @@ class BaseExchange(ABC):
                     data = await resp.json(content_type=None)
                     if cache_key:
                         self._cache_set(cache_key, data)
+                        # Store ETag for next request if server provides one
+                        etag = resp.headers.get("ETag")
+                        if etag:
+                            self._etags[cache_key] = etag
+                            self._etag_responses[cache_key] = data
                     return data
             except aiohttp.ClientResponseError as e:
                 logger.warning(
