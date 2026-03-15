@@ -1,0 +1,27 @@
+# Core async
+aiohttp==3.9.5
+asyncio==3.4.3
+
+# Database
+aiosqlite==0.20.0
+
+# NLP / Matching
+rapidfuzz==3.9.3
+
+# Terminal dashboard
+rich==13.7.1
+
+# Environment
+python-dotenv==1.0.1
+
+# Date/time
+python-dateutil==2.9.0
+
+# HTTP retries
+aiohttp-retry==2.8.3
+
+# RSA signing for Kalshi API auth
+cryptography>=42.0.0
+
+# Utilities
+orjson==3.10.3

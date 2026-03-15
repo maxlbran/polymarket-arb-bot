@@ -1,0 +1,22 @@
+# Environment / secrets
+.env
+
+# Database
+database/*.db
+database/*.db-shm
+database/*.db-wal
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.DS_Store
+.claude/
