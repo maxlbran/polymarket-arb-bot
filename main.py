@@ -30,27 +30,40 @@ from engine.scanner import Scanner
 
 def setup_logging(debug: bool = False) -> None:
     level = logging.DEBUG if debug else getattr(logging, config.LOG_LEVEL, logging.INFO)
+    is_daemon = not sys.stdout.isatty()  # running under launchd / systemd
 
-    # Console handler — only WARNING and above to avoid polluting the dashboard
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.WARNING if not debug else logging.DEBUG)
-    console_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    console_handler.setFormatter(console_fmt)
-
-    # File handler — full detail
-    Path(config.ERROR_LOG).parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(config.ERROR_LOG)
-    file_handler.setLevel(level)
-    file_fmt = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d — %(message)s",
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    file_handler.setFormatter(file_fmt)
+
+    # Console/stdout handler:
+    #   - Interactive (terminal): WARNING+ only (dashboard owns the screen)
+    #   - Daemon (no TTY): INFO+ so scan.log has full detail
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level if is_daemon else (logging.DEBUG if debug else logging.WARNING))
+    console_handler.setFormatter(fmt)
+
+    # Dedicated scan log when running as a daemon (launchd / systemd)
+    Path(config.ERROR_LOG).parent.mkdir(parents=True, exist_ok=True)
+    if is_daemon:
+        scan_log = Path(config.ERROR_LOG).parent / "scan.log"
+        scan_handler = logging.FileHandler(scan_log)
+        scan_handler.setLevel(level)
+        scan_handler.setFormatter(fmt)
+
+    # Error log — always, full detail
+    file_handler = logging.FileHandler(config.ERROR_LOG)
+    file_handler.setLevel(logging.WARNING)
+    file_handler.setFormatter(fmt)
 
     root = logging.getLogger()
     root.setLevel(level)
-    root.addHandler(console_handler)
+    if not is_daemon:
+        root.addHandler(console_handler)
     root.addHandler(file_handler)
+    if is_daemon:
+        root.addHandler(scan_handler)
 
     # Quieten noisy libraries
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
@@ -343,9 +356,12 @@ def _print_pipeline_stats(console, matcher_stats: dict, n_poly: int, n_kalshi: i
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=config.SYSTEM_NAME)
-    parser.add_argument("--once", action="store_true", help="Run single scan and exit")
-    parser.add_argument("--no-dashboard", action="store_true", help="Disable Rich dashboard")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--once",               action="store_true", help="Run single scan and exit")
+    parser.add_argument("--no-dashboard",       action="store_true", help="Disable Rich dashboard")
+    parser.add_argument("--debug",              action="store_true", help="Enable debug logging")
+    parser.add_argument("--paper-stats",        action="store_true", help="Show paper trading dashboard")
+    parser.add_argument("--export-track-record",action="store_true", help="Export track record to CSV/PDF")
+    parser.add_argument("--export-dir",         default=".",         help="Output dir for --export-track-record")
     args = parser.parse_args()
 
     setup_logging(debug=args.debug)
@@ -358,6 +374,16 @@ async def main() -> None:
     await db.connect()
 
     try:
+        if args.paper_stats:
+            from paper_trading.stats import show_paper_stats
+            await show_paper_stats(db)
+            return
+
+        if args.export_track_record:
+            from paper_trading.export import export_track_record
+            await export_track_record(db, output_dir=args.export_dir)
+            return
+
         if args.once:
             await run_once(db, debug=args.debug)
             return

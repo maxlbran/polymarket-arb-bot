@@ -127,6 +127,45 @@ CREATE INDEX IF NOT EXISTS idx_opp_tracking_poly ON opportunity_tracking(poly_ex
 CREATE INDEX IF NOT EXISTS idx_opp_tracking_first ON opportunity_tracking(first_detected_at);
 """
 
+CREATE_PAPER_TRADES = """
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    poly_external_id            TEXT NOT NULL,
+    kalshi_external_id          TEXT NOT NULL,
+    poly_title                  TEXT NOT NULL,
+    kalshi_title                TEXT NOT NULL,
+    poly_url                    TEXT,
+    kalshi_url                  TEXT,
+    category                    TEXT,
+    polarity_flipped            INTEGER DEFAULT 0,
+    resolution_date             TEXT,
+    entry_poly_yes_price        REAL NOT NULL,
+    entry_kalshi_yes_price      REAL NOT NULL,
+    entry_gross_spread          REAL NOT NULL,
+    entry_net_spread            REAL NOT NULL,
+    entry_tier                  INTEGER NOT NULL,
+    entry_risk_score            REAL NOT NULL,
+    entry_annualised_return     REAL,
+    entry_days_to_resolution    REAL,
+    match_confidence            REAL,
+    first_seen_at               TEXT NOT NULL,
+    outcome                     TEXT NOT NULL DEFAULT 'OPEN',
+    exit_poly_yes_price         REAL,
+    exit_kalshi_yes_price       REAL,
+    resolved_at                 TEXT,
+    pnl_100                     REAL,
+    pnl_1000                    REAL,
+    UNIQUE(poly_external_id, kalshi_external_id)
+);
+"""
+
+CREATE_PAPER_TRADES_IDX = """
+CREATE INDEX IF NOT EXISTS idx_pt_outcome ON paper_trades(outcome);
+CREATE INDEX IF NOT EXISTS idx_pt_first_seen ON paper_trades(first_seen_at);
+CREATE INDEX IF NOT EXISTS idx_pt_resolved ON paper_trades(resolved_at);
+CREATE INDEX IF NOT EXISTS idx_pt_resolution_date ON paper_trades(resolution_date);
+"""
+
 
 class DatabaseManager:
     def __init__(self, db_path: str = config.DB_PATH):
@@ -159,6 +198,10 @@ class DatabaseManager:
         await self._db.execute(CREATE_OPPORTUNITY_TRACKING)
         for stmt in CREATE_OPPORTUNITY_TRACKING_IDX.strip().split("\n"):
             await self._db.execute(stmt)
+        await self._db.execute(CREATE_PAPER_TRADES)
+        for stmt in CREATE_PAPER_TRADES_IDX.strip().split("\n"):
+            if stmt.strip():
+                await self._db.execute(stmt)
         await self._db.commit()
 
     # ─── Markets ─────────────────────────────────────────────────────────────
@@ -501,3 +544,146 @@ class DatabaseManager:
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else {"total": 0, "tier1": 0, "tier2": 0, "tier3": 0}
+
+    # ─── Paper trades ─────────────────────────────────────────────────────────
+
+    async def log_paper_trade(self, opp: "ArbOpportunity") -> bool:
+        """
+        INSERT OR IGNORE a paper trade for this opportunity pair.
+        Returns True if newly inserted, False if pair already exists.
+        Entry prices are snapshotted now; only the first observation is kept.
+        """
+        pm = opp.match.market_poly
+        km = opp.match.market_kalshi
+
+        # Resolve the resolution date — use earlier of the two
+        res_date = None
+        dates = [d for d in [pm.resolution_date, km.resolution_date] if d is not None]
+        if dates:
+            res_date = min(dates).isoformat()
+
+        first_seen = (opp.first_seen_at or opp.detected_at).isoformat()
+
+        async with self._db.execute(
+            """
+            INSERT OR IGNORE INTO paper_trades (
+                poly_external_id, kalshi_external_id,
+                poly_title, kalshi_title, poly_url, kalshi_url,
+                category, polarity_flipped, resolution_date,
+                entry_poly_yes_price, entry_kalshi_yes_price,
+                entry_gross_spread, entry_net_spread,
+                entry_tier, entry_risk_score, entry_annualised_return,
+                entry_days_to_resolution, match_confidence, first_seen_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                pm.external_id, km.external_id,
+                pm.title, km.title, pm.url, km.url,
+                pm.category, int(opp.match.polarity_flipped), res_date,
+                float(pm.yes_price or 0), float(km.yes_price or 0),
+                float(opp.gross_spread or 0), float(opp.net_spread or 0),
+                opp.tier, float(opp.risk_score or 0),
+                float(opp.annualised_return or 0),
+                float(opp.days_to_resolution or 0),
+                float(opp.match.confidence or 0),
+                first_seen,
+            ),
+        ) as cur:
+            inserted = cur.rowcount == 1
+        await self._db.commit()
+        return inserted
+
+    async def get_open_paper_trades(self) -> list[dict]:
+        """Return all paper trades with outcome='OPEN'."""
+        async with self._db.execute(
+            "SELECT * FROM paper_trades WHERE outcome = 'OPEN' ORDER BY first_seen_at"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def resolve_paper_trade(
+        self,
+        poly_external_id: str,
+        kalshi_external_id: str,
+        outcome: str,
+        exit_poly_yes_price: float,
+        exit_kalshi_yes_price: float,
+        pnl_100: float,
+        pnl_1000: float,
+    ) -> None:
+        """Set final outcome, exit prices, P&L, and timestamp on a paper trade."""
+        now = datetime.utcnow().isoformat()
+        await self._db.execute(
+            """
+            UPDATE paper_trades
+            SET outcome=?, exit_poly_yes_price=?, exit_kalshi_yes_price=?,
+                pnl_100=?, pnl_1000=?, resolved_at=?
+            WHERE poly_external_id=? AND kalshi_external_id=? AND outcome='OPEN'
+            """,
+            (
+                outcome, exit_poly_yes_price, exit_kalshi_yes_price,
+                pnl_100, pnl_1000, now,
+                poly_external_id, kalshi_external_id,
+            ),
+        )
+        await self._db.commit()
+
+    async def get_paper_trades_all(self) -> list[dict]:
+        """All paper trades ordered by first_seen_at ASC."""
+        async with self._db.execute(
+            "SELECT * FROM paper_trades ORDER BY first_seen_at ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_paper_trades_30d(self) -> list[dict]:
+        """Trades resolved within the last 30 days, for the rolling chart."""
+        cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
+        async with self._db.execute(
+            """
+            SELECT * FROM paper_trades
+            WHERE resolved_at >= ? AND outcome != 'OPEN'
+            ORDER BY resolved_at ASC
+            """,
+            (cutoff,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_paper_trade_stats(self) -> dict:
+        """Aggregate stats across all paper trades."""
+        async with self._db.execute(
+            """
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN outcome='OPEN'    THEN 1 ELSE 0 END) as open_count,
+                SUM(CASE WHEN outcome='WON'     THEN 1 ELSE 0 END) as won,
+                SUM(CASE WHEN outcome='LOST'    THEN 1 ELSE 0 END) as lost,
+                SUM(CASE WHEN outcome='EXPIRED' THEN 1 ELSE 0 END) as expired,
+                AVG(entry_net_spread) as avg_entry_spread,
+                SUM(CASE WHEN pnl_100 IS NOT NULL THEN pnl_100 ELSE 0 END) as total_pnl_100,
+                SUM(CASE WHEN pnl_1000 IS NOT NULL THEN pnl_1000 ELSE 0 END) as total_pnl_1000,
+                AVG(CASE WHEN outcome != 'OPEN' AND pnl_100 IS NOT NULL
+                         THEN pnl_100 END) as avg_pnl_100,
+                AVG(CASE WHEN outcome != 'OPEN' AND pnl_1000 IS NOT NULL
+                         THEN pnl_1000 END) as avg_pnl_1000
+            FROM paper_trades
+            """
+        ) as cur:
+            row = await cur.fetchone()
+        stats = dict(row) if row else {}
+
+        # Best and worst resolved trades
+        for label, order in [("best", "DESC"), ("worst", "ASC")]:
+            async with self._db.execute(
+                f"""
+                SELECT id, poly_title, entry_net_spread, pnl_100, outcome
+                FROM paper_trades
+                WHERE pnl_100 IS NOT NULL
+                ORDER BY pnl_100 {order} LIMIT 1
+                """
+            ) as cur:
+                row = await cur.fetchone()
+            stats[label] = dict(row) if row else None
+
+        return stats

@@ -38,6 +38,7 @@ from engine.calculator import ArbCalculator
 from engine.risk import RiskEngine
 from alerts.notifier import Notifier
 from display.dashboard import Dashboard
+from paper_trading import PaperTradeTracker
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ class Scanner:
         self._total_errors = 0
         # Tracks when each opportunity pair was first observed (persists across scans)
         self._first_seen: dict[str, datetime] = {}
+        self.paper_tracker = PaperTradeTracker(db)
 
     async def start(self) -> None:
         """Open connections and start the scan loop."""
@@ -278,6 +280,16 @@ class Scanner:
                 )
             except Exception as e:
                 logger.debug(f"[scanner] Tracking upsert failed: {e}")
+
+        # Paper trading: log new opportunities and check for resolutions
+        for opp in safe_opps:
+            await self.paper_tracker.log_opportunity(opp)
+        try:
+            resolved_count = await self.paper_tracker.check_resolutions(safe_opps)
+            if resolved_count:
+                logger.info(f"[scanner] Paper trading: {resolved_count} trade(s) resolved")
+        except Exception as e:
+            logger.warning(f"[scanner] Paper trade resolution check failed: {e}")
 
         # Update live opportunities list
         self._live_opportunities = safe_opps
