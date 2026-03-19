@@ -134,11 +134,16 @@ class Notifier:
         tier_label = f"TIER {opp.tier}" if opp.tier > 1 else "TIER 1 ★"
 
         print(f"  {tier_label} | Detected at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        print(f"  Net Spread:   {opp.net_spread*100:.2f}%  "
-              f"(Gross: {opp.gross_spread*100:.2f}% | Fees: {(opp.gross_spread - opp.net_spread)*100:.2f}%)")
-        print(f"  Risk Score:   {opp.risk_score:.1f}/10  |  Confidence: {opp.match.confidence:.1f}%")
-        print(f"  Expires in:   {opp.days_to_resolution:.1f} days  "
-              f"| Annualised: {opp.annualised_return:.0f}%/yr")
+        net = float(opp.net_spread or 0)
+        gross = float(opp.gross_spread or 0)
+        risk = float(opp.risk_score or 0)
+        days = float(opp.days_to_resolution or 0)
+        ann = float(opp.annualised_return or 0)
+        print(f"  Net Spread:   {net*100:.2f}%  "
+              f"(Gross: {gross*100:.2f}% | Fees: {(gross - net)*100:.2f}%)")
+        print(f"  Risk Score:   {risk:.1f}/10  |  Confidence: {float(opp.match.confidence or 0):.1f}%")
+        print(f"  Expires in:   {days:.1f} days  "
+              f"| Annualised: {ann:.0f}%/yr")
         print(f"  Kelly Size:   ${kelly:.0f} (quarter-Kelly, $1k bankroll)")
         print()
         print("  ─── TRADE INSTRUCTIONS ──────────────────────────────────────────")
@@ -204,12 +209,17 @@ class Notifier:
         km = opp.match.market_kalshi
         p100 = opp.profit_scenarios.get(100)
 
+        net = float(opp.net_spread or 0)
+        risk = float(opp.risk_score or 0)
+        days = float(opp.days_to_resolution or 0)
+        conf = float(opp.match.confidence or 0)
+        profit_100 = float(p100.net_profit_usd if p100 else 0)
         arb_logger.info(
-            f"TIER{opp.tier} | spread={opp.net_spread*100:.2f}% | "
-            f"risk={opp.risk_score:.1f} | conf={opp.match.confidence:.0f} | "
-            f"profit_100=${p100.net_profit_usd:.2f if p100 else 0:.2f} | "
-            f"poly=[{pm.title[:60]}] @ yes={pm.yes_price:.3f} | "
-            f"kalshi=[{km.title[:60]}] @ yes={km.yes_price:.3f} | "
-            f"expires_in={opp.days_to_resolution:.1f}d | "
+            f"TIER{opp.tier} | spread={net*100:.2f}% | "
+            f"risk={risk:.1f} | conf={conf:.0f} | "
+            f"profit_100=${profit_100:.2f} | "
+            f"poly=[{pm.title[:60]}] @ yes={float(pm.yes_price or 0):.3f} | "
+            f"kalshi=[{km.title[:60]}] @ yes={float(km.yes_price or 0):.3f} | "
+            f"expires_in={days:.1f}d | "
             f"poly_url={pm.url} | kalshi_url={km.url}"
         )
