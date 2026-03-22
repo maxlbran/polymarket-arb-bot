@@ -38,6 +38,11 @@ _MAX_PAGES = 500
 # Stop early if this many consecutive pages have NO markets within our horizon.
 _EARLY_STOP_PAGES = 8
 
+# Stop early if this many consecutive pages contain ONLY MVE parlays (no real markets).
+# Real markets appear in islands separated by MVE blocks up to ~42 pages long.
+# A threshold of 50 bridges those gaps while cutting the ~106-page empty tail.
+_EARLY_STOP_MVE_PAGES = 50
+
 
 def _map_category(text: str) -> str:
     if not text:
@@ -135,6 +140,7 @@ class KalshiConnector(BaseExchange):
         cursor: Optional[str] = None
         page_num = 0
         consecutive_far_pages = 0
+        consecutive_mve_pages = 0
         total_raw = 0
         total_mve = 0
 
@@ -210,8 +216,9 @@ class KalshiConnector(BaseExchange):
                     logger.debug(f"[kalshi] Normalise error {raw.get('ticker','?')}: {e}")
 
             # Early stop: if too many consecutive pages with real markets have
-            # no near-term markets. MVE-only pages do NOT advance the counter.
+            # no near-term markets. MVE-only pages do NOT advance this counter.
             if page_real_count > 0:
+                consecutive_mve_pages = 0  # reset — we found real markets again
                 if not page_has_near:
                     consecutive_far_pages += 1
                     if consecutive_far_pages >= _EARLY_STOP_PAGES:
@@ -222,6 +229,16 @@ class KalshiConnector(BaseExchange):
                         break
                 else:
                     consecutive_far_pages = 0
+            else:
+                # Page had zero real markets (all MVE / provisional).
+                # After enough such pages in a row, we've left real-market territory.
+                consecutive_mve_pages += 1
+                if consecutive_mve_pages >= _EARLY_STOP_MVE_PAGES:
+                    logger.info(
+                        f"[kalshi] Early stop after {page_num} pages "
+                        f"({_EARLY_STOP_MVE_PAGES} consecutive MVE-only pages)"
+                    )
+                    break
 
             if page_num % 20 == 0:
                 logger.info(
