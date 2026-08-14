@@ -66,7 +66,7 @@ CACHE_TTL_SECONDS = 480               # 8 minutes
 # ─── Exchange URLs ───────────────────────────────────────────────────────────
 POLYMARKET_BASE_URL = "https://gamma-api.polymarket.com"
 POLYMARKET_MARKETS_ENDPOINT = "/markets"
-POLYMARKET_PAGE_SIZE = 500            # Markets per page
+POLYMARKET_PAGE_SIZE = 100            # Gamma API hard-caps at 100 per page (as of 2026)
 
 KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_MARKETS_ENDPOINT = "/markets"

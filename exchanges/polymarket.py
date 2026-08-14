@@ -62,7 +62,7 @@ class PolymarketConnector(BaseExchange):
     # ─── Health check ────────────────────────────────────────────────────────
 
     async def _health_probe(self) -> None:
-        url = f"{self.BASE_URL}/markets"
+        url = f"{self.BASE_URL}/markets/keyset"
         await self._get(url, params={"limit": 1, "active": "true"})
 
     # ─── Market fetching ─────────────────────────────────────────────────────
@@ -70,42 +70,51 @@ class PolymarketConnector(BaseExchange):
     async def fetch_markets(self) -> list[NormalisedMarket]:
         """
         Paginate through ALL active Polymarket markets and return normalised list.
+
+        Uses /markets/keyset with cursor-based pagination (after_cursor param).
+        The legacy /markets offset endpoint is capped at ~2 500 results; the
+        keyset endpoint has no such limit and returns 150 k+ markets.
         """
         t0 = time.monotonic()
         markets: list[NormalisedMarket] = []
-        offset = 0
         page_num = 0
         page_size = config.POLYMARKET_PAGE_SIZE
         seen_ids: set[str] = set()
+        after_cursor: Optional[str] = None
 
-        logger.info("[polymarket] Starting full market fetch…")
+        logger.info("[polymarket] Starting full market fetch (keyset pagination)…")
 
         while True:
-            params = {
+            params: dict = {
                 "limit": page_size,
-                "offset": offset,
                 "active": "true",
                 "closed": "false",
                 "archived": "false",
             }
-            cache_key = f"poly_markets_offset_{offset}"
+            if after_cursor:
+                params["after_cursor"] = after_cursor
+
+            cache_key = f"poly_markets_cursor_{after_cursor or 'start'}"
             try:
                 data = await self._get(
-                    f"{self.BASE_URL}/markets",
+                    f"{self.BASE_URL}/markets/keyset",
                     params=params,
                     cache_key=cache_key,
                 )
             except ExchangeError as e:
-                logger.error(f"[polymarket] Failed to fetch page at offset {offset}: {e}")
+                logger.error(f"[polymarket] Failed to fetch page {page_num}: {e}")
                 break
 
-            # Gamma API returns a list directly
+            # Keyset endpoint returns {"markets": [...], "next_cursor": "..."}
             if isinstance(data, dict):
-                page = data.get("data", data.get("markets", []))
+                page = data.get("markets") or []
+                after_cursor = data.get("next_cursor") or None
             elif isinstance(data, list):
+                # Fallback: old-style direct list (shouldn't happen on /keyset)
                 page = data
+                after_cursor = None
             else:
-                logger.warning(f"[polymarket] Unexpected response type at offset {offset}")
+                logger.warning(f"[polymarket] Unexpected response type on page {page_num}")
                 break
 
             if not page:
@@ -125,17 +134,15 @@ class PolymarketConnector(BaseExchange):
                     logger.warning(f"[polymarket] Failed to normalise market: {e} — {raw.get('id','?')}")
 
             page_num += 1
-            if page_num % 10 == 0:
+            if page_num % 100 == 0:
                 logger.info(
-                    f"[polymarket] Page {page_num} (offset={offset}): "
-                    f"{len(markets)} markets fetched so far…"
+                    f"[polymarket] Page {page_num}: {len(markets)} markets fetched so far…"
                 )
             else:
-                logger.debug(f"[polymarket] Page {page_num} offset={offset}: {len(page)} markets (total: {len(markets)})")
+                logger.debug(f"[polymarket] Page {page_num}: {len(page)} markets (total: {len(markets)})")
 
-            if len(page) < page_size:
+            if not after_cursor:
                 break
-            offset += page_size
 
         elapsed = time.monotonic() - t0
         self._last_fetch_time = time.monotonic()
